@@ -2,6 +2,7 @@
 local limit = tonumber(ARGV[1])
 local window = tonumber(ARGV[2])
 local current = redis.call("INCRBY", KEYS[1], 1)
+-- 精华在于这一句 窗口的第一次才会设置过期时间
 if current == 1 then
     redis.call("expire", KEYS[1], window)
 end
