@@ -23,9 +23,9 @@ const (
 // see Client-Side Throttling section in https://landing.google.com/sre/sre-book/chapters/handling-overload/
 type (
 	googleBreaker struct {
-		k        float64
-		stat     *collection.RollingWindow[int64, *bucket]
-		proba    *mathx.Proba
+		k        float64                                   // 倍值 默认1.5
+		stat     *collection.RollingWindow[int64, *bucket] // 滑动时间窗口，用来对请求失败和成功计数
+		proba    *mathx.Proba                              // 动态概率
 		lastPass *syncx.AtomicDuration
 	}
 
@@ -52,11 +52,13 @@ func newGoogleBreaker() *googleBreaker {
 
 func (b *googleBreaker) accept() error {
 	var w float64
+	// 请求接受数量和请求总量
 	history := b.history()
 	w = b.k - (b.k-minK)*float64(history.failingBuckets)/buckets
 	weightedAccepts := mathx.AtLeast(w, minK) * float64(history.accepts)
 	// https://landing.google.com/sre/sre-book/chapters/handling-overload/#eq2101
 	// for better performance, no need to care about the negative ratio
+	// 计算丢弃请求概率
 	dropRatio := (float64(history.total-protection) - weightedAccepts) / float64(history.total+1)
 	if dropRatio <= 0 {
 		return nil
@@ -70,6 +72,7 @@ func (b *googleBreaker) accept() error {
 
 	dropRatio *= float64(buckets-history.workingBuckets) / buckets
 
+	// 动态判断是否触发熔断
 	if b.proba.TrueOnProba(dropRatio) {
 		return ErrServiceUnavailable
 	}

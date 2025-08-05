@@ -38,6 +38,7 @@ var (
 	// default to be enabled
 	logEnabled = syncx.ForAtomicBool(true)
 	// make it a variable for unit test
+	// cpu 检查函数
 	systemOverloadChecker = func(cpuThreshold int64) bool {
 		return stat.CpuUsage() >= cpuThreshold
 	}
@@ -48,36 +49,59 @@ type (
 	// whether the processing request is successful or not.
 	Promise interface {
 		// Pass lets the caller tell that the call is successful.
+		// 请求成功时回调此函数
 		Pass()
 		// Fail lets the caller tell that the call is failed.
+		// 请求失败时回调此函数
 		Fail()
 	}
 
 	// Shedder is the interface that wraps the Allow method.
 	Shedder interface {
 		// Allow returns the Promise if allowed, otherwise ErrServiceOverloaded.
+		// 降载检查
+		// 1. 允许调用，需手动执行 Promise.accept()/reject()上报实际执行任务结构
+		// 2. 拒绝调用，将会直接返回err：服务过载错误 ErrServiceOverloaded
 		Allow() (Promise, error)
 	}
 
 	// ShedderOption lets caller customize the Shedder.
+	// option参数模式
 	ShedderOption func(opts *shedderOptions)
 
+	// 可选配置参数
 	shedderOptions struct {
-		window       time.Duration
-		buckets      int
+		// 滑动时间窗口大小
+		window time.Duration
+		// 滑动时间窗口数量
+		buckets int
+		// cpu负载临界值
 		cpuThreshold int64
 	}
 
+	// 自适应降载结构体，需实现 Shedder 接口
 	adaptiveShedder struct {
-		cpuThreshold    int64
-		windowScale     float64
-		flying          int64
-		avgFlying       float64
-		avgFlyingLock   syncx.SpinLock
-		overloadTime    *syncx.AtomicDuration
+		// cpu负载临界值
+		// 高于临界值代表高负载需要降载保证服务
+		cpuThreshold int64
+		// 1s内有多少个桶
+		windowScale float64
+		// 并发数
+		flying int64
+		// 滑动平滑并发数
+		avgFlying float64
+		// 自旋锁，一个服务共用一个降载
+		// 统计当前正在处理的请求数时必须加锁
+		// 无损并发，提高性能
+		avgFlyingLock syncx.SpinLock
+		// 最后一次拒绝时间
+		overloadTime *syncx.AtomicDuration
+		// 最近是否被拒绝过
 		droppedRecently *syncx.AtomicBool
-		passCounter     *collection.RollingWindow[int64, *collection.Bucket[int64]]
-		rtCounter       *collection.RollingWindow[int64, *collection.Bucket[int64]]
+		// 请求数统计，通过滑动时间窗口记录最近一段时间内指标
+		passCounter *collection.RollingWindow[int64, *collection.Bucket[int64]]
+		// 响应时间统计，通过滑动时间窗口记录最近一段时间内指标
+		rtCounter *collection.RollingWindow[int64, *collection.Bucket[int64]]
 	}
 )
 
@@ -94,42 +118,63 @@ func DisableLog() {
 // NewAdaptiveShedder returns an adaptive shedder.
 // opts can be used to customize the Shedder.
 func NewAdaptiveShedder(opts ...ShedderOption) Shedder {
+	// 为了保证代码统一
+	// 当开发者关闭时返回默认的空实现，实现代码统一
+	// go-zero很多地方都采用了这种设计，比如Breaker，日志组件
 	if !enabled.True() {
 		return newNopShedder()
 	}
 
+	// options模式设置可选配置参数
 	options := shedderOptions{
-		window:       defaultWindow,
-		buckets:      defaultBuckets,
+		// 默认统计最近5s内数据
+		window: defaultWindow,
+		// 默认桶数量50个
+		buckets: defaultBuckets,
+		// cpu负载
 		cpuThreshold: defaultCpuThreshold,
 	}
 	for _, opt := range opts {
 		opt(&options)
 	}
+	// 计算每个窗口间隔时间，默认为100ms
 	bucketDuration := options.window / time.Duration(options.buckets)
 	newBucket := func() *collection.Bucket[int64] {
 		return new(collection.Bucket[int64])
 	}
 	return &adaptiveShedder{
-		cpuThreshold:    options.cpuThreshold,
-		windowScale:     float64(time.Second) / float64(bucketDuration) / millisecondsPerSecond,
-		overloadTime:    syncx.NewAtomicDuration(),
+		// cpu负载
+		cpuThreshold: options.cpuThreshold,
+		// 1s的时间内包含多少个滑动窗口单元
+		windowScale: float64(time.Second) / float64(bucketDuration) / millisecondsPerSecond,
+		// 过载的时间
+		overloadTime: syncx.NewAtomicDuration(),
+		// 最近是否被拒绝过
 		droppedRecently: syncx.NewAtomicBool(),
-		passCounter:     collection.NewRollingWindow[int64, *collection.Bucket[int64]](newBucket, options.buckets, bucketDuration, collection.IgnoreCurrentBucket[int64, *collection.Bucket[int64]]()),
-		rtCounter:       collection.NewRollingWindow[int64, *collection.Bucket[int64]](newBucket, options.buckets, bucketDuration, collection.IgnoreCurrentBucket[int64, *collection.Bucket[int64]]()),
+		// qps统计，滑动时间窗口
+		// 忽略当前正在写入窗口（桶），时间周期不完整可能导致数据异常
+		passCounter: collection.NewRollingWindow[int64, *collection.Bucket[int64]](newBucket, options.buckets, bucketDuration, collection.IgnoreCurrentBucket[int64, *collection.Bucket[int64]]()),
+		// 响应时间统计，滑动时间窗口
+		// 忽略当前正在写入窗口（桶），时间周期不完整可能导致数据异常
+		rtCounter: collection.NewRollingWindow[int64, *collection.Bucket[int64]](newBucket, options.buckets, bucketDuration, collection.IgnoreCurrentBucket[int64, *collection.Bucket[int64]]()),
 	}
 }
 
 // Allow implements Shedder.Allow.
 func (as *adaptiveShedder) Allow() (Promise, error) {
+	// 检查请求是否被丢弃
 	if as.shouldDrop() {
+		// 最近已被drop
 		as.droppedRecently.Set(true)
-
+		// 返回过载
 		return nil, ErrServiceOverloaded
 	}
 
+	// 正在处理请求数加1
 	as.addFlying(1)
 
+	// 这里每个允许的请求都会返回一个新的promise对象
+	// promise内部持有了降载指针对象
 	return &promise{
 		start:   timex.Now(),
 		shedder: as,
@@ -143,18 +188,26 @@ func (as *adaptiveShedder) addFlying(delta int64) {
 	// when the flying requests increase rapidly, avgFlying increase slower, accept more requests.
 	// when the flying requests drop rapidly, avgFlying drop slower, accept fewer requests.
 	// it makes the service to serve as many requests as possible.
+	// 请求结束后，统计当前正在处理的请求并发
 	if delta < 0 {
 		as.avgFlyingLock.Lock()
+		// 估算当前服务近一段时间内的平均请求数
 		as.avgFlying = as.avgFlying*flyingBeta + float64(flying)*(1-flyingBeta)
 		as.avgFlyingLock.Unlock()
 	}
 }
 
 func (as *adaptiveShedder) highThru() bool {
+	// 加锁
 	as.avgFlyingLock.Lock()
+	// 获取滑动平均值
+	// 每次请求结束后更新
 	avgFlying := as.avgFlying
+	// 解锁
 	as.avgFlyingLock.Unlock()
+	// 系统此时最大并发数
 	maxFlight := as.maxFlight() * as.overloadFactor()
+	// 正在处理的并发数和平均并发数是否大于系统的最大并发数
 	return avgFlying > maxFlight && float64(atomic.LoadInt64(&as.flying)) > maxFlight
 }
 
@@ -205,8 +258,13 @@ func (as *adaptiveShedder) overloadFactor() float64 {
 	return mathx.Between(factor, overloadFactorLowerBound, 1)
 }
 
+// 请求是否应该被丢弃
 func (as *adaptiveShedder) shouldDrop() bool {
+	// 当前cpu负载超过阈值
+	// 服务处于冷却期内应该继续检查负载并尝试丢弃请求
 	if as.systemOverloaded() || as.stillHot() {
+		// 检查正在处理的并发是否超出当前可承载的最大并发数
+		// 超出则丢弃请求
 		if as.highThru() {
 			flying := atomic.LoadInt64(&as.flying)
 			as.avgFlyingLock.Lock()
@@ -225,23 +283,29 @@ func (as *adaptiveShedder) shouldDrop() bool {
 }
 
 func (as *adaptiveShedder) stillHot() bool {
+	// 最近没有丢弃请求
+	// 说明服务正常
 	if !as.droppedRecently.True() {
 		return false
 	}
 
+	// 不在冷却期
 	overloadTime := as.overloadTime.Load()
 	if overloadTime == 0 {
 		return false
 	}
 
+	// 冷却时间默认为1s
 	if timex.Since(overloadTime) < coolOffDuration {
 		return true
 	}
 
+	// 不在冷却期，正常处理请求中
 	as.droppedRecently.Set(false)
 	return false
 }
 
+// cpu 是否过载
 func (as *adaptiveShedder) systemOverloaded() bool {
 	if !systemOverloadChecker(as.cpuThreshold) {
 		return false
@@ -273,16 +337,21 @@ func WithWindow(window time.Duration) ShedderOption {
 }
 
 type promise struct {
-	start   time.Duration
+	// 请求开始时间
+	start time.Duration
+	// 统计请求处理耗时
 	shedder *adaptiveShedder
 }
 
 func (p *promise) Fail() {
+	// 请求结束，当前正在处理请求数-1
 	p.shedder.addFlying(-1)
 }
 
 func (p *promise) Pass() {
+	// 响应时间，单位毫秒
 	rt := float64(timex.Since(p.start)) / float64(time.Millisecond)
+	// 请求结束，当前正在处理请求数-1
 	p.shedder.addFlying(-1)
 	p.shedder.rtCounter.Add(int64(math.Ceil(rt)))
 	p.shedder.passCounter.Add(1)

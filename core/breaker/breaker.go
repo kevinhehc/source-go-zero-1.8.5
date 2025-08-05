@@ -264,6 +264,14 @@ func (ew *errorWindow) add(reason string) {
 	ew.lock.Unlock()
 }
 
+func min(a, b int) int {
+	if a < b {
+		return a
+	} else {
+		return b
+	}
+}
+
 func (ew *errorWindow) String() string {
 	reasons := make([]string, 0, ew.count)
 
