@@ -8,6 +8,7 @@ import (
 	"time"
 )
 
+// 定时5秒打印内存信息
 const (
 	defaultInterval = time.Second * 5
 	mega            = 1024 * 1024
