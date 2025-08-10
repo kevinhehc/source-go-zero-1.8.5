@@ -13,6 +13,8 @@ import (
 	"github.com/zeromicro/go-zero/core/threading"
 )
 
+// 进程管理和优雅退出（graceful shutdown）的实现。确保服务在停止时能处理完正在进行的请求。
+
 const (
 	// defaultWrapUpTime is the default time to wait before calling wrap up listeners.
 	defaultWrapUpTime = time.Second
