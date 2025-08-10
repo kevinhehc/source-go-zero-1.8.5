@@ -145,6 +145,7 @@ func WithChain(chn chain.Chain) RunOption {
 }
 
 // WithCors returns a func to enable CORS for given origin, or default to all origins (*).
+// 跨域的处理
 func WithCors(origin ...string) RunOption {
 	return func(server *Server) {
 		server.router.SetNotAllowedHandler(cors.NotAllowedHandler(nil, origin...))
@@ -175,6 +176,7 @@ func WithCustomCors(middlewareFn func(header http.Header), notAllowedFn func(htt
 }
 
 // WithFileServer returns a RunOption to serve files from given dir with given path.
+// 文件的处理
 func WithFileServer(path string, fs http.FileSystem) RunOption {
 	return func(server *Server) {
 		server.router = newFileServingRouter(server.router, path, fs)
@@ -182,6 +184,7 @@ func WithFileServer(path string, fs http.FileSystem) RunOption {
 }
 
 // WithJwt returns a func to enable jwt authentication in given route.
+// jwt的处理
 func WithJwt(secret string) RouteOption {
 	return func(r *featuredRoutes) {
 		validateSecret(secret)
@@ -204,6 +207,7 @@ func WithJwtTransition(secret, prevSecret string) RouteOption {
 }
 
 // WithMaxBytes returns a RouteOption to set maxBytes with the given value.
+// 最大的字节数
 func WithMaxBytes(maxBytes int64) RouteOption {
 	return func(r *featuredRoutes) {
 		r.maxBytes = maxBytes

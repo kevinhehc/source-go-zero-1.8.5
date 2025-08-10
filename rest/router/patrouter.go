@@ -57,12 +57,17 @@ func (pr *patRouter) Handle(method, reqPath string, handler http.Handler) error 
 }
 
 func (pr *patRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// 返回相当于path的最短路径名称
 	reqPath := path.Clean(r.URL.Path)
+	// 查找对应 http method
 	if tree, ok := pr.trees[r.Method]; ok {
+		// 查找路由 path
 		if result, ok := tree.Search(reqPath); ok {
 			if len(result.Params) > 0 {
+				// 获取路由参数并且添加到 *http.Request 中
 				r = pathvar.WithVars(r, result.Params)
 			}
+			// 调度方法
 			result.Item.(http.Handler).ServeHTTP(w, r)
 			return
 		}
