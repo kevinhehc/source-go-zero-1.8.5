@@ -547,6 +547,7 @@ func setupWithVolume(c LogConf) error {
 	return setupWithFiles(c)
 }
 
+// 什么等级会打印什么日志
 func shallLog(level uint32) bool {
 	return atomic.LoadUint32(&logLevel) <= level
 }
