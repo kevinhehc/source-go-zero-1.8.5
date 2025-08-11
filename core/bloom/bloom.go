@@ -12,6 +12,8 @@ import (
 
 // for detailed error rate table, see http://pages.cs.wisc.edu/~cao/papers/summary-cache/node8.html
 // maps as k in the error rate table
+// 表示经过多少散列函数计算
+// 固定14次
 const maps = 14
 
 var (
@@ -29,11 +31,13 @@ var (
 
 type (
 	// A Filter is a bloom filter.
+	// 定义布隆过滤器结构体
 	Filter struct {
 		bits   uint
 		bitSet bitSetProvider
 	}
 
+	// 位数组操作接口定义
 	bitSetProvider interface {
 		check(ctx context.Context, offsets []uint) (bool, error)
 		set(ctx context.Context, offsets []uint) error
@@ -80,16 +84,22 @@ func (f *Filter) ExistsCtx(ctx context.Context, data []byte) (bool, error) {
 	return isSet, nil
 }
 
+// k次散列计算出k个offset
 func (f *Filter) getLocations(data []byte) []uint {
+	//创建指定容量的切片
 	locations := make([]uint, maps)
+	//maps表示k值,作者定义为了常量:14
 	for i := uint(0); i < maps; i++ {
+		// 哈希计算,使用的是"MurmurHash3"算法,并每次追加一个固定的i字节进行计算
 		hashValue := hash.Hash(append(data, byte(i)))
+		//取下标offset
 		locations[i] = uint(hashValue % uint64(f.bits))
 	}
 
 	return locations
 }
 
+// redis位数组
 type redisBitSet struct {
 	store *redis.Redis
 	key   string
@@ -104,6 +114,8 @@ func newRedisBitSet(store *redis.Redis, key string, bits uint) *redisBitSet {
 	}
 }
 
+// 构建偏移量offset字符串数组,因为go-redis执行lua脚本时参数定义为[]stringy
+// 因此需要转换一下
 func (r *redisBitSet) buildOffsetArgs(offsets []uint) ([]string, error) {
 	args := make([]string, 0, len(offsets))
 
@@ -118,13 +130,20 @@ func (r *redisBitSet) buildOffsetArgs(offsets []uint) ([]string, error) {
 	return args, nil
 }
 
+// 检查偏移量offset数组是否全部为1
+// 是:元素可能存在
+// 否:元素一定不存在
 func (r *redisBitSet) check(ctx context.Context, offsets []uint) (bool, error) {
 	args, err := r.buildOffsetArgs(offsets)
 	if err != nil {
 		return false, err
 	}
 
+	// 执行脚本
 	resp, err := r.store.ScriptRunCtx(ctx, testScript, []string{r.key}, args)
+
+	// 这里需要注意一下,底层使用的go-redis
+	// redis.Nil表示key不存在的情况需特殊判断
 	if errors.Is(err, redis.Nil) {
 		return false, nil
 	} else if err != nil {
@@ -140,18 +159,23 @@ func (r *redisBitSet) check(ctx context.Context, offsets []uint) (bool, error) {
 }
 
 // del only use for testing.
+// 删除
 func (r *redisBitSet) del() error {
 	_, err := r.store.Del(r.key)
 	return err
 }
 
 // expire only use for testing.
+// 自动过期
 func (r *redisBitSet) expire(seconds int) error {
 	return r.store.Expire(r.key, seconds)
 }
 
+// 将k位点全部设置为1
 func (r *redisBitSet) set(ctx context.Context, offsets []uint) error {
 	args, err := r.buildOffsetArgs(offsets)
+	// 底层使用的是go-redis,redis.Nil表示操作的key不存在
+	// 需要针对key不存在的情况特殊判断
 	if err != nil {
 		return err
 	}
