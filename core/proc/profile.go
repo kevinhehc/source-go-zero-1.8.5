@@ -19,17 +19,22 @@ import (
 
 // DefaultMemProfileRate is the default memory profiling rate.
 // See also http://golang.org/pkg/runtime/#pkg-variables
+// 默认的内存画像采样率：约每 4KB 分配记录一次样本（越小越重）
 const DefaultMemProfileRate = 4096
 
 // started is non zero if a profile is running.
+// started：是否已开启一个全局画像会话（0=未开始，1=已开始），用原子操作保护
 var started uint32
 
 // Profile represents an active profiling session.
+// Profile 表示一次“画像会话”，把所有类型的画像统一管理
 type Profile struct {
 	// closers holds cleanup functions that run after each profile
+	// closers：每种画像对应的“停止/清理”函数，Stop 时按顺序调用
 	closers []func()
 
 	// stopped records if a call to profile.Stop has been made
+	// stopped：是否已经 Stop 过，防止重复 Stop
 	stopped uint32
 }
 
@@ -39,6 +44,7 @@ func (p *Profile) close() {
 	}
 }
 
+// 开启阻塞画像（goroutine 在 channel/锁等处阻塞的采样）
 func (p *Profile) startBlockProfile() {
 	fn := createDumpFile("block")
 	f, err := os.Create(fn)
@@ -47,6 +53,7 @@ func (p *Profile) startBlockProfile() {
 		return
 	}
 
+	// 设置采样率为 1（每个阻塞事件都记录），Stop 时再设回 0
 	runtime.SetBlockProfileRate(1)
 	logx.Infof("profile: block profiling enabled, %s", fn)
 	p.closers = append(p.closers, func() {
@@ -57,6 +64,7 @@ func (p *Profile) startBlockProfile() {
 	})
 }
 
+// 开启 CPU 画像
 func (p *Profile) startCpuProfile() {
 	fn := createDumpFile("cpu")
 	f, err := os.Create(fn)
@@ -74,6 +82,7 @@ func (p *Profile) startCpuProfile() {
 	})
 }
 
+// 开启内存画像（heap）
 func (p *Profile) startMemProfile() {
 	fn := createDumpFile("mem")
 	f, err := os.Create(fn)
@@ -82,10 +91,12 @@ func (p *Profile) startMemProfile() {
 		return
 	}
 
+	// 记录旧的采样率，开启更细的采样
 	old := runtime.MemProfileRate
 	runtime.MemProfileRate = DefaultMemProfileRate
 	logx.Infof("profile: memory profiling enabled (rate %d), %s", runtime.MemProfileRate, fn)
 	p.closers = append(p.closers, func() {
+		// 常见做法会先 runtime.GC() 让 heap 画像更及时（见下方建议）
 		pprof.Lookup("heap").WriteTo(f, 0)
 		f.Close()
 		runtime.MemProfileRate = old
@@ -93,6 +104,7 @@ func (p *Profile) startMemProfile() {
 	})
 }
 
+// 开启互斥锁画像（锁竞争热点）
 func (p *Profile) startMutexProfile() {
 	fn := createDumpFile("mutex")
 	f, err := os.Create(fn)
@@ -101,6 +113,7 @@ func (p *Profile) startMutexProfile() {
 		return
 	}
 
+	// 1 表示对阻塞在互斥锁上的 goroutine 采样
 	runtime.SetMutexProfileFraction(1)
 	logx.Infof("profile: mutex profiling enabled, %s", fn)
 	p.closers = append(p.closers, func() {
@@ -113,6 +126,7 @@ func (p *Profile) startMutexProfile() {
 	})
 }
 
+// 线程创建画像（goroutine/thread 创建）
 func (p *Profile) startThreadCreateProfile() {
 	fn := createDumpFile("threadcreate")
 	f, err := os.Create(fn)
@@ -131,6 +145,7 @@ func (p *Profile) startThreadCreateProfile() {
 	})
 }
 
+// 调度/事件 trace（与 pprof 不同，记录更细粒度的时间线）
 func (p *Profile) startTraceProfile() {
 	fn := createDumpFile("trace")
 	f, err := os.Create(fn)
